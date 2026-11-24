@@ -102,10 +102,13 @@ export function createBasket(scene) {
 
     scene.add(pole);
 
+    return { ring };
+
 }
 
 
 // Geometrie und Material werden von allen Bällen geteilt
+// (deshalb beim Entfernen eines Balls KEIN dispose() aufrufen)
 const ballGeometry = new THREE.SphereGeometry(0.18, 32, 32);
 
 const ballMaterial = new THREE.MeshStandardMaterial({
@@ -117,90 +120,16 @@ const ballMaterial = new THREE.MeshStandardMaterial({
 // Basketball erstellen (jeder Aufruf = neuer Ball)
 export function createBall() {
 
-    const ball = new THREE.Mesh(ballGeometry, ballMaterial);
+    // Material klonen, damit jeder Ball seine eigene Farbe haben kann
+    const ball = new THREE.Mesh(ballGeometry, ballMaterial.clone());
     ball.castShadow = true;
 
     return ball;
-
 }
 
 
-// Wurflinie erstellen
-export function createThrowLine(scene) {
 
-    const start = new THREE.Vector3(0, 4, 5);
-
-    const gravity = 9.81;
-    const SEGMENTS = 100;
-    const TIME_STEP = 0.02;
-
-    const positions = new Float32Array(
-        (SEGMENTS + 1) * 3
-    );
-
-    const geometry = new THREE.BufferGeometry();
-
-    geometry.setAttribute(
-        'position',
-        new THREE.BufferAttribute(positions, 3)
-    );
-
-    const line = new THREE.Line(
-        geometry,
-        new THREE.LineBasicMaterial({
-            color: 0x0000ff
-        })
-    );
-
-    line.frustumCulled = false;
-
-    scene.add(line);
-
-    // Wurflinie anhand der Physik berechnen
-    function update(kraft, startPos = start) {
-
-        const velocity = new THREE.Vector3(
-            0,
-            3 + kraft * 0.08,
-            -kraft * 0.2
-        );
-
-        const points = [];
-
-        for (let i = 0; i <= SEGMENTS; i++) {
-
-            const t = i * TIME_STEP;
-
-            const point = new THREE.Vector3(
-                startPos.x + velocity.x * t,
-                startPos.y + velocity.y * t
-                    - 0.5 * gravity * t * t,
-                startPos.z + velocity.z * t
-            );
-
-            // Flugbahn am Boden beenden
-            if (point.y < 0.18) {
-                break;
-            }
-
-            points.push(point);
-        }
-
-        // Geometrie mit berechneten Punkten aktualisieren
-        geometry.setFromPoints(points);
-
-        geometry.computeBoundingSphere();
-    }
-
-    update(50);
-
-    return {
-        update
-    };
-}
-
-
-// Arm erstellen: Schulter -> Oberarm -> Ellbogen -> Unterarm
+// Arm mit Oberkörper erstellen: Schulter -> Oberarm -> Ellbogen -> Unterarm
 export function createArm(scene) {
 
     const geometry = new THREE.BoxGeometry();
@@ -243,5 +172,75 @@ export function createArm(scene) {
 
     scene.add(shoulder);
 
-    return { shoulder, elbow };
+
+    // ---------- Oberkörper ----------
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+        color: 0x1e3a8a,
+        roughness: 0.8,
+        metalness: 0
+    });
+
+    const jointMaterial = new THREE.MeshStandardMaterial({
+        color: 0x333333,
+        roughness: 0.6,
+        metalness: 0.2
+    });
+
+    // Gruppe: Ursprung = Schulterposition (folgt der Schulter in main.js)
+    const body = new THREE.Group();
+    body.position.copy(shoulder.position);
+    scene.add(body);
+
+    // Rumpf (Breite 0.7, Höhe 0.8, Tiefe 0.4), Oberkante knapp über der Schulter
+    const torso = new THREE.Mesh(
+        new THREE.BoxGeometry(0.7, 0.8, 0.4),
+        bodyMaterial
+    );
+    torso.position.set(0.4, -0.3, 0.1);
+    torso.castShadow = true;
+    body.add(torso);
+
+    // Schultergelenk (Kugel am Armansatz)
+    const shoulderJoint = new THREE.Mesh(
+        new THREE.SphereGeometry(0.12, 16, 16),
+        jointMaterial
+    );
+    shoulderJoint.castShadow = true;
+    body.add(shoulderJoint);
+
+    // Hals
+    const neck = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.08, 0.08, 0.12, 16),
+        jointMaterial
+    );
+    neck.position.set(0.4, 0.16, 0.1);
+    body.add(neck);
+
+    // Kopf
+    const head = new THREE.Mesh(
+        new THREE.SphereGeometry(0.2, 24, 24),
+        bodyMaterial
+    );
+    head.position.set(0.4, 0.38, 0.1);
+    head.castShadow = true;
+    body.add(head);
+
+    // Ständer (Basishöhe 3.3, wird in main.js passend skaliert)
+    const stand = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.1, 0.1, 3.3, 16),
+        jointMaterial
+    );
+    stand.castShadow = true;
+    scene.add(stand);
+
+    // Sockel
+    const base = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.5, 0.5, 0.1, 32),
+        jointMaterial
+    );
+    base.castShadow = true;
+    base.receiveShadow = true;
+    scene.add(base);
+
+    return { shoulder, elbow, body, stand, base };
 }

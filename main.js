@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import Stats from 'three/addons/libs/stats.module.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 import { createLights } from './lights.js';
@@ -8,11 +7,11 @@ import {
     createGround,
     createBasket,
     createBall,
-    createThrowLine,
     createArm
 } from './Objects.js';
 
 import { createGUI } from './gui.js';
+import { calculateThrowVelocity, updatePhysics } from './physics.js';
 
 
 function init() {
@@ -37,6 +36,7 @@ function init() {
     );
 
     camera.position.set(0, 5, 15);
+    
 
 
     // =====================================
@@ -52,12 +52,6 @@ function init() {
         window.innerHeight
     );
 
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-
-    document.getElementById('WebGL-output').appendChild(renderer.domElement);
-
-
     // =====================================
     // KAMERA-STEUERUNG
     // =====================================
@@ -66,19 +60,17 @@ function init() {
 
     controls.target.set(0, 3.05, -7);
     controls.enableDamping = true;
+    controls.maxPolarAngle = Math.PI / 2 - 0.05;   // Kamera bleibt über dem Boden
     controls.update();
 
 
-    // =====================================
-    // FPS-ANZEIGE
-    // =====================================
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-    const stats = new Stats();
-    document.body.appendChild(stats.dom);
-
+    document.getElementById('WebGL-output').appendChild(renderer.domElement);
 
     // =====================================
-    // SCORE-ANZEIGE
+    // SCORE-ANZEIGE & TREFFER-EFFEKT
     // =====================================
 
     const scoreDisplay = document.createElement('div');
@@ -97,35 +89,33 @@ function init() {
     scoreDisplay.textContent = 'Punkte: 0';
     document.body.appendChild(scoreDisplay);
 
+    const SCORE_LIGHT_MAX = 120;    // Helligkeit beim Treffer
+    const SCORE_LIGHT_FADE = 2.5;   // Abklingen pro Sekunde
+    let score = 0;
+
+    function handleScore() {
+        score++;
+        scoreDisplay.textContent = 'Punkte: ' + score;
+
+        // Treffer-Effekt
+        scoreLight.intensity = SCORE_LIGHT_MAX;
+        hemisphereLight.intensity = 0;               // Umgebungslicht aus
+        ring.material.emissive.set(0xffdd00);
+        ring.material.emissiveIntensity = 3;
+
+        console.log('Korb! Punkte:', score);
+    }
+
 
     // =====================================
     // OBJEKTE ERSTELLEN
     // =====================================
 
-    createLights(scene);
+    const {scoreLight, hemisphereLight} = createLights(scene);
+    const HEMI_BASE = hemisphereLight.intensity;   // normale Helligkeit merken
     createGround(scene);
-    createBasket(scene);
-
+    const {ring} = createBasket(scene);
     const arm = createArm(scene);
-
-    const { update: updateThrowLine } = createThrowLine(scene);
-
-
-    // =====================================
-    // PHYSIK
-    // =====================================
-
-    const gravity = 9.81;
-    const ballRadius = 0.18;
-
-    // Substeps gegen "Tunneling" (Ball fliegt durch Brett/Ring)
-    const SUBSTEPS = 4;
-
-    // Ring: Werte müssen zum Torus in Objects.js passen
-    const RING_CENTER = new THREE.Vector3(0, 3.05, -6.73);
-    const RING_RADIUS = 0.30;
-    const RING_TUBE = 0.02;
-
     const clock = new THREE.Clock();
 
 
@@ -142,7 +132,6 @@ function init() {
     // Ende des Unterarms (0.38) + Ballradius (0.18), lokal zum Ellbogen
     const HAND_OFFSET = new THREE.Vector3(0, 0, -0.56);
 
-    const handWorld = new THREE.Vector3();
 
 
     // Neuen Ball erzeugen und in die Hand legen
@@ -177,7 +166,7 @@ function init() {
 
         balls.push({
             mesh: mesh,
-            velocity: calculateThrowVelocity(params.Kraft),
+            velocity: calculateThrowVelocity(params.Kraft, params.ElbowX),
             moving: true,
             prevPos: mesh.position.clone(),   // für die Korb-Erkennung
             scored: false                     // pro Ball nur einmal zählen
@@ -186,7 +175,9 @@ function init() {
         // Zu viele Bälle: ältesten entfernen
         if (balls.length > MAX_BALLS) {
             const oldest = balls.shift();
+            if (oldest.mesh === hoveredBall) setHover(null);
             scene.remove(oldest.mesh);
+            oldest.mesh.material.dispose();
         }
 
         // Hand ist jetzt leer
@@ -196,194 +187,66 @@ function init() {
 
 
     // =====================================
-    // WURFGESCHWINDIGKEIT BERECHNEN
+    // PICKING: HOVER-FARBE + ANKLICKEN = EINSAMMELN
     // =====================================
 
-    function calculateThrowVelocity(kraft) {
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    const HOVER_COLOR = 0xffee00;
+    let hoveredBall = null;   // Mesh unter der Maus
 
-        return new THREE.Vector3(
-            0,
-            3 + kraft * 0.08,
-            -kraft * 0.2
-        );
+    // Gibt den Index des Balls unter der Maus zurück (-1 = keiner)
+    function pickBallIndex(event) {
+        const rect = renderer.domElement.getBoundingClientRect();
+        pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
+        raycaster.setFromCamera(pointer, camera);
+        const hits = raycaster.intersectObjects(balls.map(b => b.mesh), false);
+        if (hits.length === 0) return -1;
+
+        return balls.findIndex(b => b.mesh === hits[0].object);
     }
 
+    function setHover(mesh) {
+        if (mesh === hoveredBall) return;
 
-    // =====================================
-    // 1. KOLLISION MIT DEM BRETT
-    // =====================================
-
-    function checkBoardCollision(ball, velocity) {
-
-        const radius = ballRadius;
-
-        const center = new THREE.Vector3(0, 3.425, -7);
-
-        const half = new THREE.Vector3(
-            0.9,
-            0.525,
-            0.025
-        );
-
-        const closest = new THREE.Vector3(
-            THREE.MathUtils.clamp(
-                ball.position.x,
-                center.x - half.x,
-                center.x + half.x
-            ),
-            THREE.MathUtils.clamp(
-                ball.position.y,
-                center.y - half.y,
-                center.y + half.y
-            ),
-            THREE.MathUtils.clamp(
-                ball.position.z,
-                center.z - half.z,
-                center.z + half.z
-            )
-        );
-
-        const normal = new THREE.Vector3()
-            .subVectors(ball.position, closest);
-
-        const distance = normal.length();
-
-        if (distance < radius) {
-
-            if (distance < 0.0001) {
-
-                normal.set(
-                    0,
-                    0,
-                    velocity.z < 0 ? 1 : -1
-                );
-
-            } else {
-
-                normal.normalize();
-
-            }
-
-            ball.position.copy(closest)
-                .addScaledVector(normal, radius + 0.001);
-
-            const speed = velocity.dot(normal);
-
-            if (speed < 0) {
-
-                velocity.addScaledVector(
-                    normal,
-                    -(1 + 0.7) * speed
-                );
-
-            }
-
+        // alten Ball zurücksetzen
+        if (hoveredBall) {
+            hoveredBall.material.emissive.set(0x000000);
         }
 
-    }
-
-
-    // =====================================
-    // 2. KOLLISION MIT DEM BASKETBALLRING
-    // =====================================
-
-    function checkRingCollision(ball, velocity) {
-
-        const dx = ball.position.x - RING_CENTER.x;
-        const dz = ball.position.z - RING_CENTER.z;
-
-        const angle = Math.atan2(dz, dx);
-
-        const closest = new THREE.Vector3(
-            RING_CENTER.x + Math.cos(angle) * RING_RADIUS,
-            RING_CENTER.y,
-            RING_CENTER.z + Math.sin(angle) * RING_RADIUS
-        );
-
-        const normal = new THREE.Vector3()
-            .subVectors(ball.position, closest);
-
-        const distance = normal.length();
-
-        const collisionDistance = ballRadius + RING_TUBE;
-
-        if (distance < collisionDistance) {
-
-            if (distance < 0.0001) {
-
-                normal.set(
-                    0,
-                    velocity.y >= 0 ? 1 : -1,
-                    0
-                );
-
-            } else {
-
-                normal.normalize();
-
-            }
-
-            ball.position.copy(closest)
-                .addScaledVector(
-                    normal,
-                    collisionDistance + 0.001
-                );
-
-            const speed = velocity.dot(normal);
-
-            if (speed < 0) {
-
-                velocity.addScaledVector(
-                    normal,
-                    -(1 + 0.7) * speed
-                );
-
-            }
-
+        // neuen Ball hervorheben
+        if (mesh) {
+            mesh.material.emissive.set(HOVER_COLOR);
+            mesh.material.emissiveIntensity = 0.8;
         }
 
+        hoveredBall = mesh;
+        renderer.domElement.style.cursor = mesh ? 'pointer' : 'default';
     }
 
+    // Maus bewegt sich: Ball unter der Maus einfärben
+    renderer.domElement.addEventListener('pointermove', (event) => {
+        const index = pickBallIndex(event);
+        setHover(index !== -1 ? balls[index].mesh : null);
+    });
 
-    // =====================================
-    // 3. KORB-ERKENNUNG
-    // =====================================
-
-    // Prüft pro Ball, ob er von oben durch die Ringebene geflogen ist.
-    // Muss nach jedem Physik-Schritt genau einmal pro Ball laufen,
-    // weil sich der Ball die vorherige Position merkt.
-    function checkScore(b) {
-
-        const pos = b.mesh.position;
-        const prev = b.prevPos;
-        let hit = false;
-
-        if (!b.scored && prev.y > RING_CENTER.y && pos.y <= RING_CENTER.y) {
-
-            // Schnittpunkt mit der Ringebene interpolieren
-            const t = (prev.y - RING_CENTER.y) / (prev.y - pos.y);
-            const x = THREE.MathUtils.lerp(prev.x, pos.x, t);
-            const z = THREE.MathUtils.lerp(prev.z, pos.z, t);
-
-            // Die Ringkollision verhindert schon, dass der Ball außen vorbeigeht,
-            // deshalb reicht der Ringradius als Grenze.
-            if (Math.hypot(x - RING_CENTER.x, z - RING_CENTER.z) < RING_RADIUS) {
-                b.scored = true;
-                hit = true;
-            }
-
+    // Klick: Ball einsammeln (löschen)
+    renderer.domElement.addEventListener('pointerdown', (event) => {
+        const index = pickBallIndex(event);
+        if (index !== -1) {
+            const mesh = balls[index].mesh;
+            if (mesh === hoveredBall) setHover(null);
+            scene.remove(mesh);
+            mesh.material.dispose();   // eigenes Material, daher dispose ok
+            balls.splice(index, 1);    // auch aus der Physik entfernen
         }
-
-        prev.copy(pos);
-
-        return hit;
-
-    }
+    });
 
 
     // =====================================
-    // 4. GUI
+    // GUI
     // =====================================
 
     const params = createGUI(
@@ -393,85 +256,11 @@ function init() {
 
 
     // Ersten Ball in die Hand legen
-    // (nach createGUI, weil throwBall params benutzt)
     spawnBall();
 
 
     // =====================================
-    // 5. FENSTERGRÖSSE ANPASSEN
-    // =====================================
-
-    window.addEventListener('resize', () => {
-
-        camera.aspect =
-            window.innerWidth / window.innerHeight;
-
-        camera.updateProjectionMatrix();
-
-        renderer.setSize(
-            window.innerWidth,
-            window.innerHeight
-        );
-
-    });
-
-
-    // =====================================
-    // 6. PHYSIK-SCHRITT FÜR EINEN BALL
-    // =====================================
-
-    let score = 0;
-
-    function stepBall(b, h) {
-
-        const ball = b.mesh;
-        const velocity = b.velocity;
-
-        // Schwerkraft
-        velocity.y -= gravity * h;
-
-        // Position aktualisieren
-        ball.position.addScaledVector(velocity, h);
-
-        // Kollisionen
-        checkBoardCollision(ball, velocity);
-        checkRingCollision(ball, velocity);
-
-        // Korb?
-        if (checkScore(b)) {
-            score++;
-            scoreDisplay.textContent = 'Punkte: ' + score;
-            console.log('Korb! Punkte:', score);
-        }
-
-        // Ballrotation
-        ball.rotation.x += velocity.z * h * 2;
-        ball.rotation.z -= velocity.x * h * 2;
-
-        // Bodenkollision
-        if (ball.position.y <= ballRadius) {
-
-            ball.position.y = ballRadius;
-
-            velocity.y *= -0.7;
-            velocity.x *= 0.8;
-            velocity.z *= 0.8;
-
-            // Ball bleibt liegen, wenn er kaum noch springt
-            if (Math.abs(velocity.y) < 1) {
-
-                velocity.set(0, 0, 0);
-                b.moving = false;
-
-            }
-
-        }
-
-    }
-
-
-    // =====================================
-    // 7. ANIMATION
+    // ANIMATION
     // =====================================
 
     function animate() {
@@ -481,57 +270,55 @@ function init() {
         const dt = Math.min(clock.getDelta(), 0.05);
 
         controls.update();
-        stats.update();
+
+
+        // ---------------------------------
+        // TREFFER-EFFEKT AUSFADEN
+        // ---------------------------------
+
+        if (scoreLight.intensity > 0) {
+
+            scoreLight.intensity = Math.max(
+                0,
+                scoreLight.intensity - SCORE_LIGHT_MAX * SCORE_LIGHT_FADE * dt
+            );
+
+            const f = scoreLight.intensity / SCORE_LIGHT_MAX;   // 1 -> 0
+
+            ring.material.emissiveIntensity = 3 * f;
+            hemisphereLight.intensity = HEMI_BASE * (1 - f);    // 0 -> normal
+
+        }
 
 
         // ---------------------------------
         // ARM POSITIONIEREN
         // ---------------------------------
+        const SHOULDER_Y = 1.5;
 
-        arm.shoulder.position.set(params.X, params.Y, params.Z);
+        arm.shoulder.position.set(params.X, SHOULDER_Y, params.Z);
         arm.shoulder.rotation.x = params.ShoulderX;
-        arm.shoulder.rotation.y = params.ShoulderY;
         arm.elbow.rotation.x = params.ElbowX;
 
 
         // ---------------------------------
-        // WURFLINIE AN DER HAND
+        // OBERKÖRPER FOLGT DER SCHULTER
         // ---------------------------------
 
-        arm.shoulder.updateMatrixWorld(true);
+        arm.body.position.set(params.X, SHOULDER_Y, params.Z);
 
-        if (heldBall) {
+        // Ständer reicht vom Boden bis zur Rumpf-Unterkante (0.7 unter der Schulter)
 
-            heldBall.getWorldPosition(handWorld);
-
-        } else {
-
-            // Hand leer: Linie von der Handposition aus zeichnen
-            handWorld.copy(HAND_OFFSET);
-            arm.elbow.localToWorld(handWorld);
-
-        }
-
-        updateThrowLine(params.Kraft, handWorld);
-
+        const standHeight = Math.max(SHOULDER_Y - 0.7, 0.01);
+        arm.stand.scale.y = standHeight / 3.3;
+        arm.stand.position.set(params.X + 0.4, standHeight / 2, params.Z + 0.1);
+        arm.base.position.set(params.X + 0.4, 0.05, params.Z + 0.1);
 
         // ---------------------------------
-        // BALLPHYSIK (alle fliegenden Bälle, mit Substeps)
+        // BALLPHYSIK
         // ---------------------------------
 
-        const h = dt / SUBSTEPS;
-
-        for (const b of balls) {
-
-            for (let i = 0; i < SUBSTEPS; i++) {
-
-                if (!b.moving) break;
-
-                stepBall(b, h);
-
-            }
-
-        }
+        updatePhysics(balls, dt, handleScore);
 
 
         // ---------------------------------
