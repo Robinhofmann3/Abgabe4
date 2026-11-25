@@ -7,16 +7,16 @@ export function createLights(scene) {
     scene.add(hemisphereLight);
 
     // Gerichtetes Licht
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 2);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0, 4);
     directionalLight.position.set(-20, 30, 30);
     directionalLight.castShadow = true;
     directionalLight.shadow.mapSize.set(2048, 2048);
     scene.add(directionalLight);
 
     // Treffer-Licht: aus, bis ein Punkt fällt
-    const scoreLight = new THREE.PointLight(0xdd2200, 0, 0, 2);
+    const scoreLight = new THREE.PointLight(0xdd2200, 0, 0, 0.2);
     scoreLight.position.set(0, 3.6, -5.8);
     scene.add(scoreLight);
 
-    return { scoreLight, hemisphereLight };
+    return { scoreLight, hemisphereLight, directionalLight };
 }
